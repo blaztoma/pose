@@ -1,0 +1,4 @@
+# Run in a separate environment from the legacy mp.solutions implementation.
+-e .[mediapipe-tasks]
+mediapipe==1.0.1
+vidgear>=0.3.3,<0.4

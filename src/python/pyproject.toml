@@ -33,6 +33,10 @@ mediapipe = [
     "mediapipe<0.10.30",
 ]
 
+mediapipe-tasks = [
+    "mediapipe>=1.0.1,<2",
+]
+
 mmpose = [
     "mmcv>=2.1.0",
     "mmengine>=0.10.7",
@@ -44,6 +48,8 @@ mmpose = [
 packages = [
     "pose_format",
     "pose_format.bin",
+    "pose_format.animation",
+    "pose_format.estimation",
     "pose_format.utils",
     "pose_format.testing",
     "pose_format.numpy",
@@ -86,3 +92,8 @@ pose_info = "pose_format.bin.pose_info:main"
 video_to_pose = "pose_format.bin.pose_estimation:main"
 videos_to_poses = "pose_format.bin.directory:main"
 visualize_pose = "pose_format.bin.pose_visualizer:main"
+filter_poses = "pose_format.bin.filter_poses:main"
+animate_poses = "pose_format.animation.animate_poses:main"
+
+[tool.setuptools.package-data]
+"pose_format.estimation" = ["*.json"]

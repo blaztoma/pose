@@ -4,3 +4,5 @@
 .coverage
 .coveragerc
 coverage.lcov
+.venv/
+.venv-tasks/

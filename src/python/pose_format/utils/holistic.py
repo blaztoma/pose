@@ -245,7 +245,7 @@ def process_holistic(frames: list,
                      additional_face_points=0,
                      additional_holistic_config={},
                      pose_workers=1,
-                     reuse=True) -> NumPyPoseBody:
+                     reuse=True, on_frame=None) -> NumPyPoseBody:
     """
     process frames using holistic model from mediapipe
 
@@ -315,6 +315,8 @@ def process_holistic(frames: list,
                     datas.append(data)
                     confs.append(conf)
                     next_to_collect += 1
+                    if on_frame is not None:
+                        on_frame()
 
             while next_to_collect in pending:
                 results = pending.pop(next_to_collect).result()
@@ -322,6 +324,8 @@ def process_holistic(frames: list,
                 datas.append(data)
                 confs.append(conf)
                 next_to_collect += 1
+                if on_frame is not None:
+                    on_frame()
 
         if not datas:
             raise ValueError("need at least one array to stack")
@@ -483,7 +487,7 @@ def load_holistic(frames: list,
                   progress=False,
                   additional_holistic_config={},
                   pose_workers=1,
-                  reuse=True) -> Pose:
+                  reuse=True, on_frame=None) -> Pose:
     """
     Loads holistic pose data
 
@@ -522,7 +526,8 @@ def load_holistic(frames: list,
                                     dimensions=dimensions,
                                     components=holistic_components(pf, additional_face_points))
     body: NumPyPoseBody = process_holistic(frames, fps, width, height, kinect, progress, additional_face_points,
-                                           additional_holistic_config, pose_workers=pose_workers, reuse=reuse)
+                                           additional_holistic_config, pose_workers=pose_workers, reuse=reuse,
+                                           on_frame=on_frame)
 
     return Pose(header, body)
 

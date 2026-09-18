@@ -1,10 +1,10 @@
 import argparse
 from pathlib import Path
 from pose_format.bin.pose_estimation import pose_video, parse_additional_config
+from pose_format.estimation.base import add_estimator_arguments, create_estimator
 from typing import List
-import logging
 from tqdm import tqdm
-from tqdm.contrib.concurrent import process_map
+from pose_format.bin.estimation_progress import in_worker, parallel_results, send_event, status
 import os
 from functools import partial
 
@@ -17,6 +17,7 @@ def find_videos_with_missing_pose_files(
     video_suffixes: List[str] = None,
     recursive: bool = False,
     keep_video_suffixes: bool = False,
+    output_directory: Path = None,
 ) -> List[Path]:
     """
     Finds videos with missing .pose files.
@@ -47,20 +48,22 @@ def find_videos_with_missing_pose_files(
 
     glob_method = getattr(directory, "rglob" if recursive else "glob")
     all_files = list(glob_method(f"*"))
-    video_files = [path for path in all_files if path.suffix in video_suffixes]
-    pose_files = {path for path in all_files if path.suffix == ".pose"}
+    if isinstance(video_suffixes, str):
+        video_suffixes = [video_suffixes]
+    video_files = [path for path in all_files if path.is_file() and path.suffix.lower() in video_suffixes]
 
     videos_with_missing_pose_files = []
 
     for vid_path in video_files:
-        corresponding_pose = get_corresponding_pose_path(video_path=vid_path, keep_video_suffixes=keep_video_suffixes)
-        if corresponding_pose not in pose_files:
+        corresponding_pose = get_corresponding_pose_path(vid_path, keep_video_suffixes, directory, output_directory)
+        if not corresponding_pose.is_file():
             videos_with_missing_pose_files.append(vid_path)
 
     return videos_with_missing_pose_files
 
 
-def get_corresponding_pose_path(video_path: Path, keep_video_suffixes: bool = False) -> Path:
+def get_corresponding_pose_path(video_path: Path, keep_video_suffixes: bool = False,
+                                directory: Path = None, output_directory: Path = None) -> Path:
     """
     Given a video path, and whether to keep the suffix, returns the expected corresponding path with .pose extension.
 
@@ -77,29 +80,42 @@ def get_corresponding_pose_path(video_path: Path, keep_video_suffixes: bool = Fa
     Path
         pathlib Path
     """
+    if output_directory is not None:
+        video_path = output_directory / video_path.relative_to(directory)
     if keep_video_suffixes:
         return video_path.with_name(f"{video_path.name}.pose")
     return video_path.with_suffix(".pose")
 
 
-def process_video(keep_video_suffixes: bool, pose_format: str, additional_config: dict, vid_path: Path) -> bool:
-    cpu_num = os.sched_getcpu() if hasattr(os, 'sched_getcpu') else "N/A"
-    print(f'Estimating {vid_path} on CPU {cpu_num}')
+def process_video(keep_video_suffixes: bool, pose_format: str, additional_config: dict, vid_path: Path,
+                  *, backend='mediapipe-legacy', device='cpu', model=None,
+                  directory=None, output_directory=None, progress=True) -> bool:
+    label = str(vid_path.relative_to(directory)) if directory is not None else vid_path.name
+    status(f'Estimating {vid_path} with {backend} on {device}')
+
+    def report(completed, total):
+        send_event('frame', label, completed, total)
 
     try:
-        pose_path = get_corresponding_pose_path(video_path=vid_path, keep_video_suffixes=keep_video_suffixes)
+        pose_path = get_corresponding_pose_path(vid_path, keep_video_suffixes, directory, output_directory)
         if pose_path.is_file():
-            print(f"Skipping {vid_path}, corresponding .pose file already created.")
+            status(f"Skipping {vid_path}, corresponding .pose file already created.")
         else:
             # pose_video function expects string, and passes it unchanged to cv2.VideoCapture(input_path)
             # if you give cv2.VideoCapture(input_path) a Path it crashes on older versions.
             # https://github.com/opencv/opencv/issues/15731
-            pose_video(str(vid_path.resolve()), str(pose_path.resolve()), pose_format, additional_config, progress=False)
+            pose_video(str(vid_path.resolve()), str(pose_path.resolve()), pose_format, additional_config, progress=progress,
+                       backend=backend, device=device, model=model, verbose=False,
+                       progress_callback=report if in_worker() else None,
+                       progress_position=1, progress_label=label)
             return True
             
-    except ValueError as e:
-        print(f"ValueError on {vid_path}")
-        logging.exception(e)
+    except (ValueError, RuntimeError, ImportError, OSError) as e:
+        status(f"Error on {vid_path}: {type(e).__name__}: {e}")
+    finally:
+        if in_worker():
+            send_event('finished', label)
+    return False
         
 
 def main():
@@ -149,13 +165,27 @@ def main():
         type=str,
         help="additional configuration for the pose estimator",
     )
+    add_estimator_arguments(parser)
+    parser.add_argument('--output-directory', type=Path,
+                        help='Separate output root, preserving input subdirectories (existing outputs are skipped)')
+    parser.add_argument('--no-progress', action='store_true', help='Disable video and frame progress bars')
     args = parser.parse_args()
+    if not args.directory.is_dir():
+        parser.error(f'Input directory does not exist: {args.directory}')
+    if args.num_workers < 1:
+        parser.error('--num-workers must be positive')
+    additional_config = parse_additional_config(args.additional_config)
+    try:
+        create_estimator(args.backend, args.device, args.model, additional_config)
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
 
     videos_with_missing_pose_files = find_videos_with_missing_pose_files(
         args.directory,
         video_suffixes=args.video_suffixes,
         recursive=args.recursive,
         keep_video_suffixes=args.keep_video_suffixes,
+        output_directory=args.output_directory,
     )
 
     print(f"Found {len(videos_with_missing_pose_files)} videos missing pose files.")
@@ -170,8 +200,6 @@ def main():
             print(f"Exiting. To keep video suffixes and avoid collisions, use --keep-video-suffixes")
             exit()
 
-    additional_config = parse_additional_config(args.additional_config)
-
     pose_with_no_errors_count = 0
 
     if args.num_workers == 1:
@@ -180,9 +208,22 @@ def main():
         available_cpus = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else os.cpu_count()
         print(f'Multiprocessing with {args.num_workers} workers on {available_cpus} available CPUs ...')
 
-    func = partial(process_video, args.keep_video_suffixes, args.format, additional_config)
-    for success in process_map(func, videos_with_missing_pose_files, max_workers=args.num_workers):
+    func = partial(process_video, args.keep_video_suffixes, args.format, additional_config,
+                   backend=args.backend, device=args.device, model=args.model,
+                   directory=args.directory, output_directory=args.output_directory,
+                   progress=not args.no_progress)
+    results = (map(func, videos_with_missing_pose_files)
+               if args.num_workers == 1 else
+               parallel_results(func, videos_with_missing_pose_files, args.num_workers))
+    for success in tqdm(results, total=len(videos_with_missing_pose_files), desc='Videos',
+                        unit='video', position=0, dynamic_ncols=True, disable=args.no_progress):
         if success:
             pose_with_no_errors_count += 1
 
     print(f"Successfully created pose files for {pose_with_no_errors_count}/{len(videos_with_missing_pose_files)} video files")
+    if pose_with_no_errors_count != len(videos_with_missing_pose_files):
+        raise SystemExit(1)
+
+
+if __name__ == '__main__':
+    main()
