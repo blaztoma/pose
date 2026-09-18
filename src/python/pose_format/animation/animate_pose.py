@@ -16,6 +16,8 @@ from mathutils import Matrix, Quaternion, Vector
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from motion import head_motion, torso_motion, smooth_valid, mp_to_rig
 from progress import report
+from arm_ik import calibrate_arms, solve_two_bone
+from face import animate_face
 
 IDENTITY = Quaternion()
 
@@ -128,10 +130,27 @@ def main():
     mapping = {}
     stats = {'frames': frames, 'fps': float(data['fps']), 'animated_bones': [],
              'torso_motion': torso_stats, 'head_motion': head_stats,
-             'note': 'Head rotation and shoulder-based torso yaw/side lean, relative to initial neutral frames. No facial expressions or forward torso bend. Fixed lower body. Missing head/torso samples hold local rotations. Short hand gaps interpolated; long gaps hold local hand/finger rotations. Unreliable arms ease to a neutral hanging pose.'}
+             'note': 'Head rotation and shoulder-based torso yaw/side lean, relative to initial neutral frames. No forward torso bend. Fixed lower body. Missing head/torso samples hold local rotations. Short hand gaps interpolated; long gaps hold local hand/finger rotations. Unreliable arms ease to a neutral hanging pose.'}
 
     def segment(a, b):
         return rest_head[b] - rest_head[a]
+
+    arm_solver = job.get('arm_solver', 'ik')
+    avatar = {'shoulder_width': segment('Bip01 R UpperArm', 'Bip01 L UpperArm').length}
+    for side, letter in [('LEFT', 'L'), ('RIGHT', 'R')]:
+        avatar[side] = (segment(f'Bip01 {letter} UpperArm', f'Bip01 {letter} Forearm').length,
+                        segment(f'Bip01 {letter} Forearm', f'Bip01 {letter} Hand').length)
+    report('Calibrating arms', 0, 1, 'step')
+    targets, calibration = calibrate_arms(data, body, body_conf, body_names, avatar)
+    stats['arm_solver'] = arm_solver
+    stats['arm_calibration'] = calibration
+    if arm_solver == 'ik':
+        stats['note'] += ' IK uses image-space gesture position, estimated world depth and fixed avatar link lengths.'
+    report('Calibrating arms', 1, 1, 'step')
+    ik_world = np.zeros((frames, 2, 3))
+    ik_valid = np.zeros((frames, 2), dtype=bool)
+    ik_errors, clamp_errors = [], []
+    previous_bend = {}
 
     scene = bpy.context.scene
     scene.render.fps = round(float(data['fps']))
@@ -149,6 +168,14 @@ def main():
             bone = rig.data.bones[name]
             parent = inherited(bone.parent.name) if bone.parent else IDENTITY
             return parent @ relative[name]
+
+        def posed_head(name):
+            bone = rig.data.bones[name]
+            if bone.parent is None:
+                return rest_head[name].copy()
+            parent = bone.parent.name
+            offset = rest_rot[parent].inverted() @ (rest_head[name] - rest_head[parent])
+            return posed_head(parent) + inherited(parent) @ offset
 
         def apply(name, goal=None, blend=0.6):
             bone = rig.data.bones[name]
@@ -183,14 +210,27 @@ def main():
         apply('Bip01 Head', goal)
         mapping['Bip01 Head'] = 'FACE upper-face rigid fit; independent of torso orientation'
 
+        shoulder_center = (posed_head('Bip01 L UpperArm') + posed_head('Bip01 R UpperArm')) / 2
+
         for side, letter in [('LEFT','L'), ('RIGHT','R')]:
             upper = f'Bip01 {letter} UpperArm'
             fore = f'Bip01 {letter} Forearm'
             hand = f'Bip01 {letter} Hand'
             rest_upper, rest_fore = segment(upper, fore), segment(fore, hand)
             points, valid = world[side]
-            if valid[frame]:
-                shoulder, elbow, wrist = map(Vector, points[frame])
+            offsets, usable = targets[side]
+            use_ik = arm_solver == 'ik' and usable[frame]
+            if use_ik or valid[frame]:
+                if use_ik:
+                    shoulder = posed_head(upper)
+                    pole, target = np.asarray(shoulder_center) + offsets[frame]
+                    elbow, wrist, bend, clamped = solve_two_bone(
+                        shoulder, target, pole, *avatar[side], previous_bend.get(side))
+                    previous_bend[side] = bend
+                    clamp_errors.append(clamped)
+                    elbow, wrist = Vector(elbow), Vector(wrist)
+                else:
+                    shoulder, elbow, wrist = map(Vector, points[frame])
                 u, f = elbow-shoulder, wrist-elbow
                 for name, direction, secondary, ref, ref_secondary in [
                     (upper,u,f,rest_upper,rest_fore), (fore,f,u,rest_fore,rest_upper)]:
@@ -199,7 +239,14 @@ def main():
                         goal = (target_basis @ rest_basis.transposed()).to_quaternion() @ rest_rot[name]
                     else:
                         goal = ref.normalized().rotation_difference(direction.normalized()) @ rest_rot[name]
-                    apply(name, goal)
+                    # Targets are already smoothed. Smoothing solved rotations
+                    # again would move the wrist away from the IK target.
+                    apply(name, goal, blend=1.0 if use_ik else .6)
+                if use_ik:
+                    side_index = 0 if side == 'LEFT' else 1
+                    ik_world[frame, side_index] = rig.matrix_world @ wrist
+                    ik_valid[frame, side_index] = True
+                    ik_errors.append((posed_head(hand) - wrist).length)
             else:
                 # Unobserved arms ease to a declared neutral fallback, not A-pose.
                 sign = 1 if side == 'LEFT' else -1
@@ -208,8 +255,10 @@ def main():
                     (upper,u,f,rest_upper,rest_fore), (fore,f,u,rest_fore,rest_upper)]:
                     delta = basis(direction, secondary) @ basis(ref, ref_secondary).transposed()
                     apply(name, delta.to_quaternion() @ rest_rot[name], blend=0.15)
-            mapping[upper] = f'{side}_SHOULDER -> {side}_ELBOW (world)'
-            mapping[fore] = f'{side}_ELBOW -> {side}_WRIST (world)'
+            mapping[upper] = (f'{side}: calibrated wrist target + elbow pole (IK), world-rotation fallback'
+                              if arm_solver == 'ik' else f'{side}_SHOULDER -> {side}_ELBOW (world)')
+            mapping[fore] = (f'{side}: fixed-length analytical IK; baked rotation keyframes'
+                             if arm_solver == 'ik' else f'{side}_ELBOW -> {side}_WRIST (world)')
 
             hp, hv = hands[side]
             h = hp[frame]
@@ -240,9 +289,20 @@ def main():
 
         report('Animating', frame + 1, frames)
 
+    stats['face'] = animate_face(meshes, data, report, job.get('mouth_calibration', 'auto'))
+    stats['face']['input'] = job.get('face_input', {})
     rig.animation_data.action.name = job['name'] + '_upper_body_from_pose'
     stats['animated_bones'] = sorted(last_local)
     stats['mapping'] = mapping
+    stats['arm_ik'] = {'solved_frames_left': int(ik_valid[:, 0].sum()),
+                       'solved_frames_right': int(ik_valid[:, 1].sum()),
+                       'clamped_targets': int(np.count_nonzero(np.asarray(clamp_errors) > 1e-4)),
+                       'max_target_clamp_rig_units': max(clamp_errors, default=0.),
+                       'max_solver_error_rig_units': max(ik_errors, default=0.),
+                       'targets_file': str(Path(job['report']).with_name('ik_targets.npz'))}
+    if max(ik_errors, default=0.) > avatar['shoulder_width'] * 1e-4:
+        raise ValueError(f'IK forward-kinematic validation failed: {max(ik_errors)}')
+    np.savez_compressed(stats['arm_ik']['targets_file'], targets_world=ik_world, valid=ik_valid)
     for side in hands:
         stats[side.lower() + '_hand_frames_after_short_gap_fill'] = int(hands[side][1].sum())
     # Confirm no lower-body animation curves were introduced.

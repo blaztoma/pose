@@ -11,6 +11,7 @@ from contextlib import ExitStack
 from tqdm import tqdm
 
 from .prepare_pose import prepare_pose
+from .face import find_extras
 from .progress import parse as parse_progress
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -87,6 +88,10 @@ def make_job(source, model, embed_textures=False):
 def fingerprint(job, video):
     """Invalidate completion markers when input, model, textures or code changes."""
     files = [Path(job['source']), Path(job['model']), *sorted(SCRIPTS.glob('*.py'))]
+    if job.get('face_animation', 'auto') != 'off':
+        extras = find_extras(Path(job['source']))
+        if extras is not None:
+            files.append(extras)
     model = Path(job['model'])
     for folder in (model.parent.parent / 'Textures', model.parent / 'Textures'):
         if folder.is_dir():
@@ -171,11 +176,15 @@ def _animate_one(source, args, blender, progress):
     model = find_model(source, args.model)
     video = find_video(source)
     job = make_job(source, model, args.embed_textures)
+    job['arm_solver'] = getattr(args, 'arm_solver', 'ik')
+    job['face_animation'] = getattr(args, 'face_animation', 'auto')
+    job['mouth_calibration'] = getattr(args, 'mouth_calibration', 'auto')
     job['blender'] = blender
     work = Path(job['data']).parent
     marker = work / 'completed.json'
     outputs = [Path(job[k]) for k in ('fbx', 'blend', 'preview', 'report', 'validation', 'data')]
     outputs.append(Path(job['data']).with_suffix('.json'))
+    outputs.append(work / 'ik_targets.npz')
     if video:
         outputs.append(Path(job['comparison']))
     signature = fingerprint(job, video)
@@ -189,7 +198,9 @@ def _animate_one(source, args, blender, progress):
     ffmpeg = find_executable('ffmpeg', args.ffmpeg) if video else None
     tqdm.write('  Preparing pose data...')
     progress.update('Preparing pose', 0, 1, 'step')
-    summary = prepare_pose(source, Path(job['data']))
+    summary = prepare_pose(source, Path(job['data']), face_animation=job['face_animation'])
+    job['face_input'] = summary['face']
+    tqdm.write('  Face animation: ' + summary['face']['status'])
     progress.update('Preparing pose', 1, 1, 'step')
     job_file = work / 'job.json'
     job_file.write_text(json.dumps(job, indent=2), encoding='utf-8')
@@ -234,7 +245,13 @@ def main():
     parser.add_argument('--ffmpeg', help='FFmpeg executable (otherwise PATH)')
     parser.add_argument('--overwrite', action='store_true', help='Regenerate completed animations')
     parser.add_argument('--embed-textures', action='store_true', help='Embed textures in each FBX/Blender file (larger outputs)')
+    parser.add_argument('--arm-solver', choices=['ik', 'rotation'], default='ik',
+                        help='Automatic proportion calibration and wrist IK (default), or previous rotation mapping')
     parser.add_argument('--dry-run', action='store_true', help='List filtered poses without creating files')
+    parser.add_argument('--face-animation', choices=['auto', 'off'], default='auto',
+                        help='Animate ARKit/Rocketbox face shapes from matching .pose.extras.jsonl (default: auto)')
+    parser.add_argument('--mouth-calibration', choices=['auto', 'off'], default='auto',
+                        help='Fit mouth opening to face landmarks on the supported Rocketbox avatar (default: auto)')
     parser.add_argument('--no-progress', action='store_true', help='Disable animation and stage progress bars')
     args = parser.parse_args()
     try:

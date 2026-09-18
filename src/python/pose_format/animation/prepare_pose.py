@@ -5,9 +5,13 @@ from pathlib import Path
 
 import numpy as np
 from pose_format import Pose
+if __package__:
+    from .face import find_extras, load_face
+else:  # Keep the standalone prepare_pose.py command usable.
+    from face import find_extras, load_face
 
 
-def prepare_pose(source: Path, output: Path):
+def prepare_pose(source: Path, output: Path, face_animation='auto'):
     pose = Pose.read(source.read_bytes())
     frames, people, _, dimensions = pose.body.data.shape
     if frames == 0 or people != 1 or dimensions != 3:
@@ -47,6 +51,11 @@ def prepare_pose(source: Path, output: Path):
             'detected_frames': int(detected.sum()),
             'detected_ranges_zero_based': [[int(g[0]), int(g[-1])] for g in groups if len(g)]}
         offset = stop
+    extras = find_extras(source) if face_animation != 'off' else None
+    summary['face'] = {'status': 'disabled' if face_animation == 'off' else 'missing_sidecar'}
+    if extras is not None:
+        face_arrays, summary['face'] = load_face(extras, frames, float(pose.body.fps))
+        arrays.update(face_arrays)
     output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(output, **arrays)
     output.with_suffix('.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')

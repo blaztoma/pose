@@ -34,7 +34,118 @@ Alternatyva be naujo console entry point:
 python -m pose_format.animation.animate_poses -i "H:\Science\ViSign\experiments"
 ```
 
-## Rezultatai
+## Automatinis kalibravimas ir rankų IK
+
+Numatytasis `--arm-solver ik` kiekvienam pozų failui automatiškai įvertina žmogaus
+pečių plotį, žastų ir dilbių ilgius iš patikimų kadrų. Naudojama mediana su
+išskirčių atmetimu; nereikia T pozos ar rankiniu būdu įvesti ūgio. Avataro matmenys
+nuskaitomi iš etaloninio FBX kaulų. Klubai ir kojų taškai kalibravimui nenaudojami.
+
+Riešų aukštis ir tarpusavio atstumas pirmiausia gaunami iš vaizdo taškų pečių
+vidurio atžvilgiu. Aptiktas detalus plaštakos riešas naudojamas, jei nėra pernelyg
+toli nuo kūno riešo. Pečių plotis suteikia bendrą vaizdo mastelį abiem rankoms;
+kūno pasauliniai taškai ir žmogaus / avataro rankų ilgių santykis suteikia gylio
+įvertį. Alkūnės taškas nurodo rankos lenkimo pusę.
+
+Naudojamas analitinis dviejų kaulų IK: apskaičiuojama alkūnės padėtis ir kaulų
+pasukimai, kurie iš karto įrašomi kaip įprasti rotacijų raktai. FBX nepriklauso
+nuo Blender IK apribojimų ar pagalbinių objektų. Avataro kaulų ilgiai nekeičiami.
+Nepasiekiami taikiniai apribojami pagal rankos pasiekiamumą. Taikiniai glodinami
+prieš IK; išspręstos rankų rotacijos papildomai neglodinamos, kad riešai nenukryptų.
+Delnų ir pirštų orientacijos toliau gaunamos iš esamos plaštakų animacijos.
+
+Jei nėra bent 5 patikimų proporcijų įverčių, atitinkama ranka naudoja ankstesnį
+rotacijų metodą; tai aiškiai įrašoma ataskaitoje. Trumpi stebėjimų tarpai
+interpoliuojami, o ilgiems tarpams išlieka esama rankų atsarginė animacija.
+Kalibravimas skirtas vienam žmogui ir nekintančiam kameros masteliui tame pačiame
+faile; keičiantis žmogui ar kameros planui įrašą reikia suskaidyti į atkarpas.
+
+`.animation/<pozos_vardas>/retarget_report.json` skyriai `arm_calibration` ir
+`arm_ik` pateikia matmenis, panaudotų kadrų skaičius, atsarginio metodo priežastis,
+apribotų taikinių skaičių ir skaičiavimo paklaidą. `ik_targets.npz` saugo riešų
+taikinius FBX patikrai. `validation.json` papildomai tikrina riešų padėtis po
+FBX pakartotinio importo. Maža ši paklaida patvirtina eksporto tikslumą, o ne
+žmogaus tikrųjų 3D koordinačių tikslumą.
+
+```powershell
+animate_poses -i "H:\Science\ViSign\lrt_videos" --overwrite
+```
+
+Ankstesniam metodui palyginti naudokite `--arm-solver rotation`.
+IK savaime nesprendžia pirštų kontakto ar plaštakų / rankų susikirtimo su kūnu.
+Neapibrėžtas gylis ir prastai aptikti taškai vis dar gali sukelti neatitikimų.
+
+## Veido mimika
+
+Pagal nutylėjimą `--face-animation auto` ieško atitinkamo MediaPipe Tasks
+failo: `lt_filtered.pose` → `lt.pose.extras.jsonl` (arba
+`lt.mp4_filtered.pose` → `lt.mp4.pose.extras.jsonl`). Jei yra pačios filtruotos
+pozos `lt_filtered.pose.extras.jsonl`, naudojamas jis.
+
+```powershell
+animate_poses -i "H:\Science\ViSign\lrt_videos" --recursive --overwrite
+```
+
+Rocketbox modelyje 51 MediaPipe koeficientas susiejamas su `AK_*` shape keys:
+lūpos, žandikaulis, antakiai, skruostai, mirksėjimas ir akių kryptis.
+`_neutral` nėra judesys; liežuvio `tongueOut` MediaPipe duomenyse nėra.
+Kiti modelio mimikos rinkiniai (`AU_*`, visemos) lieka neutralūs, kad tas pats
+judesys nebūtų pritaikytas kelis kartus. Koeficientai perkeliami be laikinio
+glodinimo, kad neišnyktų trumpi mirksniai. Burnos atsivėrimui papildomai
+taikomas toliau aprašytas kalibravimas.
+
+Tikrinamas tikslus kadrų skaičius, indeksai ir laiko žymos. Apkarpant pozą
+būtina apkarpyti ir sidecar, jo indeksus bei laiką pradėti nuo nulio.
+Trumpi veido aptikimo tarpai iki 100 ms interpoliuojami, ilgesniuose veidas
+neutralus. Klaidingas ar nesutampantis sidecar sustabdo to failo generavimą.
+Jei sidecar nėra, kūno animacija veikia kaip anksčiau ir konsolė praneša
+`missing_sidecar`. Senos CPU `.pose` veido taškų koordinatės savaime nėra
+blendshape koeficientai: reikia MediaPipe Tasks sugeneruoto papildomo failo.
+
+Mimikai išjungti: `--face-animation off`. Keičiant ar pridedant sidecar
+rezultatas automatiškai perskaičiuojamas net ir be `--overwrite`.
+Mimika išsaugoma tiek `.blend`, tiek `.fbx`. FBX patikra lygina visų susietų
+kanalų reikšmes keliuose kadruose, įskaitant kiekvieno kanalo minimumą ir maksimumą.
+Atitikmenys ir aptikimo statistika pateikiami `retarget_report.json`, patikros
+rezultatai – `validation.json`. Tai mimikos perkėlimas; jis negarantuoja
+gestų kalbos artikuliacijos tikslumo ir dar nėra MetaHuman veido integracija.
+
+### Burnos atsivėrimo kalibravimas
+
+Pagal nutylėjimą `--mouth-calibration auto` matuoja vidinių lūpų tarpo ir
+burnos pločio santykį iš `.pose` veido taškų (13, 14, 61, 291). Matavimas
+nepriklauso nuo vaizdo mastelio ar pasukimo vaizdo plokštumoje. Mažesnis nei
+0,02 santykis laikomas užčiaupta burna. Labai mažas veidas, nepatikimi taškai,
+stiprus galvos pasukimas arba trūkstama mimika palieka pradinius koeficientus.
+
+Etaloniniam `Male_Adult_01` modeliui patikrinti keturi burnos geometrijos
+taškai; profilis tikrinamas pagal tinklo topologiją. Kiekvienam kadrui
+atsižvelgiama į visų pradinių mimikos koeficientų poveikį burnos pločiui ir
+tarpui. Pirmiausia koreguojamas `jawOpen`; jei jo eigos nepakanka, koreguojami
+`mouthLowerDownLeft/Right`, `mouthUpperUpLeft/Right` ir `mouthClose`.
+Visi svoriai lieka 0–1 ribose. Mirksėjimas, antakiai, galva ir rankos nekeičiami.
+Nenaudojamas viso klipo maksimumo normalizavimas – silpnas judesys netampa
+maksimaliu išsižiojimu. Nepasiekiamas atsivėrimas lieka apribotas modelio eiga
+ir pažymimas ataskaitoje. Kito topologijos modelio kalibravimas praleidžiamas.
+
+Ankstesniam tiesioginiam perkėlimui palyginti:
+
+```powershell
+animate_poses -i "H:\Science\ViSign\experiments\facial_animation\man" --mouth-calibration off --overwrite
+```
+
+`retarget_report.json` → `face.mouth_calibration` pateikia panaudotų kadrų
+skaičių, matavimo skirtumus prieš ir po korekcijos, užčiauptos burnos statistiką
+ir pavyzdžių kadrus. FBX patikra papildomai matuoja pakartotinai importuotos
+burnos geometriją tuose kadruose. Kalibravimui nereikia naujo video aptikimo,
+jei jau turite `.pose` su veido taškais ir atitinkamą `.pose.extras.jsonl`.
+
+Tai apytikslis matomo atsivėrimo pritaikymas. Jis negarantuoja viso lūpų
+kontūro, dantų ar liežuvio padėties tikslumo; priklauso nuo aptiktų taškų.
+Modelio matavimas atliekamas neutralioje galvos orientacijoje, todėl galvos
+perspektyva peržiūroje gali pakeisti matomą santykį.
+
+## Išvesties failai
 
 Šalia `lt_filtered.pose` sukuriami:
 
@@ -90,7 +201,7 @@ klaidos kodą, jei bent vienas darbas nepavyko. `--dry-run` tik išvardija įves
 Animuojami žastai, dilbiai, plaštakos, pirštai, galva ir du viršutiniai stuburo
 kaulai (39 kaulai iš viso). Galvos pasukimas, linktelėjimas ir šoninis palenkimas
 gaunami iš standaus viršutinės veido dalies taškų sutapdinimo; lūpų ir žandikaulio
-taškai nenaudojami. Tai galvos orientacija, o ne veido mimikos animacija.
+taškai nenaudojami. Veido mimika atskirai gaunama iš Tasks blendshape koeficientų.
 
 Liemens pasisukimas ir šoninis pasvirimas skaičiuojami tik iš pečių linijos.
 Nematomų ar filtruotų klubų koordinatės nenaudojamos. Lenkimasis pirmyn/atgal ir
@@ -102,7 +213,7 @@ pasukta galva ar kūnu, ši pradinė poza taip pat bus laikoma neutralia.
 Galvos tikslinė orientacija neprideda liemens pasukimo antrą kartą. Nejudinamas
 apatinis stuburo kaulas, prie kurio Rocketbox skelete prijungtos kojos; dubuo ir
 kojos išlieka stabilūs. Kaklas ir raktikauliai paveldi viršutinio liemens judesį.
-Mimika kol kas neanimuojama. Nepatikimuose galvos/liemens kadruose laikomas
+Nepatikimuose galvos/liemens kadruose laikomas
 paskutinis vietinis pasukimas. Kai nėra veido komponento ar tinkamų taškų,
 galva tiesiog paveldi liemens judesį.
 
