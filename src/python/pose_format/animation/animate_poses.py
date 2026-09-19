@@ -85,9 +85,12 @@ def make_job(source, model, embed_textures=False):
             'embed_textures': embed_textures}
 
 
-def fingerprint(job, video):
-    """Invalidate completion markers when input, model, textures or code changes."""
-    files = [Path(job['source']), Path(job['model']), *sorted(SCRIPTS.glob('*.py'))]
+def fingerprint(job, video=None, stage='animation'):
+    """Keep rendering dependencies separate from animation generation."""
+    scripts = sorted(SCRIPTS.glob('*.py'))
+    if stage == 'animation':
+        scripts = [p for p in scripts if p.name != 'render_preview.py']
+    files = [Path(job['source']), Path(job['model']), *scripts]
     if job.get('face_animation', 'auto') != 'off':
         extras = find_extras(Path(job['source']))
         if extras is not None:
@@ -96,10 +99,13 @@ def fingerprint(job, video):
     for folder in (model.parent.parent / 'Textures', model.parent / 'Textures'):
         if folder.is_dir():
             files.extend(sorted(p for p in folder.rglob('*') if p.is_file()))
-    if video:
+    if stage == 'render':
+        files.append(Path(job['blend']))
+    if video and stage == 'render':
         files.append(video)
     info = [(str(p), p.stat().st_size, p.stat().st_mtime_ns) for p in files]
-    return hashlib.sha256(json.dumps([job, info], sort_keys=True).encode()).hexdigest()
+    settings = {key: value for key, value in job.items() if key != 'face_input'}
+    return hashlib.sha256(json.dumps([stage, settings, info], sort_keys=True).encode()).hexdigest()
 
 
 def is_complete(marker, signature, outputs):
@@ -110,6 +116,15 @@ def is_complete(marker, signature, outputs):
                     state.get('sizes', {}).get(str(p)) == p.stat().st_size for p in outputs))
     except (OSError, ValueError):
         return False
+
+
+def mark_complete(marker, signature, outputs):
+    if not all(p.is_file() and p.stat().st_size > 0 for p in outputs):
+        raise RuntimeError(f'Not all expected outputs were created; see {marker.parent}')
+    temporary = marker.with_suffix('.tmp')
+    temporary.write_text(json.dumps({'fingerprint': signature,
+                                     'sizes': {str(p): p.stat().st_size for p in outputs}}, indent=2), encoding='utf-8')
+    temporary.replace(marker)
 
 
 class StageProgress:
@@ -174,44 +189,66 @@ def animate_one(source, args, blender):
 
 def _animate_one(source, args, blender, progress):
     model = find_model(source, args.model)
-    video = find_video(source)
+    render = getattr(args, 'render', False)
     job = make_job(source, model, args.embed_textures)
     job['arm_solver'] = getattr(args, 'arm_solver', 'ik')
     job['face_animation'] = getattr(args, 'face_animation', 'auto')
     job['mouth_calibration'] = getattr(args, 'mouth_calibration', 'auto')
     job['blender'] = blender
     work = Path(job['data']).parent
-    marker = work / 'completed.json'
-    outputs = [Path(job[k]) for k in ('fbx', 'blend', 'preview', 'report', 'validation', 'data')]
+    marker = work / 'animation_completed.json'
+    render_marker = work / 'render_completed.json'
+    outputs = [Path(job[k]) for k in ('fbx', 'blend', 'report', 'validation', 'data')]
     outputs.append(Path(job['data']).with_suffix('.json'))
     outputs.append(work / 'ik_targets.npz')
-    if video:
-        outputs.append(Path(job['comparison']))
-    signature = fingerprint(job, video)
-    if not args.overwrite and is_complete(marker, signature, outputs):
-        tqdm.write(f'Skipping completed: {source}')
-        return 'skipped'
+    signature = fingerprint(job)
+    animation_complete = not args.overwrite and is_complete(marker, signature, outputs)
     work.mkdir(parents=True, exist_ok=True)
-    # An interrupted or failed rerun must never leave a valid completion marker.
-    if marker.exists():
-        marker.unlink()
-    ffmpeg = find_executable('ffmpeg', args.ffmpeg) if video else None
-    tqdm.write('  Preparing pose data...')
-    progress.update('Preparing pose', 0, 1, 'step')
-    summary = prepare_pose(source, Path(job['data']), face_animation=job['face_animation'])
-    job['face_input'] = summary['face']
-    tqdm.write('  Face animation: ' + summary['face']['status'])
-    progress.update('Preparing pose', 1, 1, 'step')
     job_file = work / 'job.json'
-    job_file.write_text(json.dumps(job, indent=2), encoding='utf-8')
-    for script, label in [('animate_pose.py', 'Building FBX and Blender scene'),
-                          ('verify_animation.py', 'Checking exported FBX'),
-                          ('render_preview.py', 'Rendering preview')]:
+
+    def run_blender(script, label):
         tqdm.write(f'  {label} ({summary["frames"]} frames, {summary["fps"]:g} FPS)...')
         progress.update(label + ' / starting', 0, 1, 'step')
         run_logged([blender, '--background', '--factory-startup', '--python-exit-code', '1',
                     '--python', SCRIPTS / script, '--', '--job', job_file], work / (Path(script).stem + '.log'),
                    progress=progress)
+
+    if not animation_complete:
+        # Publish animation completion before optional rendering, so a render
+        # failure never forces a repeat of pose preparation, IK and FBX checks.
+        marker.unlink(missing_ok=True)
+        render_marker.unlink(missing_ok=True)
+        tqdm.write('  Preparing pose data...')
+        progress.update('Preparing pose', 0, 1, 'step')
+        summary = prepare_pose(source, Path(job['data']), face_animation=job['face_animation'])
+        job['face_input'] = summary['face']
+        tqdm.write('  Face animation: ' + summary['face']['status'])
+        progress.update('Preparing pose', 1, 1, 'step')
+        job_file.write_text(json.dumps(job, indent=2), encoding='utf-8')
+        run_blender('animate_pose.py', 'Building FBX and Blender scene')
+        run_blender('verify_animation.py', 'Checking exported FBX')
+        mark_complete(marker, signature, outputs)
+    else:
+        tqdm.write(f'  Reusing completed animation: {source}')
+
+    if not render:
+        return 'skipped' if animation_complete else 'created'
+
+    video = find_video(source)
+    render_outputs = [Path(job['preview'])]
+    if video:
+        render_outputs.append(Path(job['comparison']))
+    render_signature = fingerprint(job, video, stage='render')
+    if not args.overwrite and is_complete(render_marker, render_signature, render_outputs):
+        tqdm.write(f'  Skipping completed render: {source}')
+        return 'skipped' if animation_complete else 'created'
+    render_marker.unlink(missing_ok=True)
+    ffmpeg = find_executable('ffmpeg', args.ffmpeg) if video else None
+    if animation_complete:
+        summary = json.loads(Path(job['data']).with_suffix('.json').read_text(encoding='utf-8'))
+        job['face_input'] = summary['face']
+        job_file.write_text(json.dumps(job, indent=2), encoding='utf-8')
+    run_blender('render_preview.py', 'Rendering preview')
     if video:
         tqdm.write('  Creating comparison video...')
         progress.update('Creating comparison', 0, summary['frames'])
@@ -226,10 +263,7 @@ def _animate_one(source, args, blender, progress):
                    progress=progress, ffmpeg_total=summary['frames'])
     else:
         tqdm.write('  No original video found; comparison omitted.')
-    if not all(p.is_file() and p.stat().st_size > 0 for p in outputs):
-        raise RuntimeError(f'Not all expected outputs were created; see {work}')
-    marker.write_text(json.dumps({'fingerprint': signature,
-                                  'sizes': {str(p): p.stat().st_size for p in outputs}}, indent=2), encoding='utf-8')
+    mark_complete(render_marker, render_signature, render_outputs)
     return 'created'
 
 
@@ -243,6 +277,9 @@ def main():
     parser.add_argument('--model', type=Path, help='Rocketbox FBX (otherwise find a local reference_model or project models folder)')
     parser.add_argument('--blender', help='Blender executable (otherwise auto-detected)')
     parser.add_argument('--ffmpeg', help='FFmpeg executable (otherwise PATH)')
+    parser.add_argument('--render', action='store_true',
+                        help='Also render a preview and, if the source video is available, a comparison; '
+                             'default: generate and validate animation only')
     parser.add_argument('--overwrite', action='store_true', help='Regenerate completed animations')
     parser.add_argument('--embed-textures', action='store_true', help='Embed textures in each FBX/Blender file (larger outputs)')
     parser.add_argument('--arm-solver', choices=['ik', 'rotation'], default='ik',

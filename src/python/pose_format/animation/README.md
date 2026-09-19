@@ -12,6 +12,17 @@ Aktyvioje pose projekto Python aplinkoje:
 animate_poses -i "H:\Science\ViSign\experiments" --recursive
 ```
 
+Pagal nutylėjimą kuriami `.blend`, `.fbx` ir atliekama FBX eksporto patikra.
+Peržiūros ir palyginimo video kuriami tik pridėjus **`--render`**:
+
+```powershell
+animate_poses -i "H:\Science\ViSign\experiments" --recursive --render
+```
+
+`--render` galima pridėti vėliau: jei animacija jau paruošta ir jos įvestys bei
+nustatymai nepasikeitė, atliekamas tik renderinimas. Be šios vėliavėlės nereikia
+FFmpeg ar originalaus video; kalibravimas, IK ir veido animacija vis tiek vykdomi.
+
 Katalogai pagal nutylėjimą apdorojami rekursyviai, todėl `--recursive` galima
 praleisti. Atrenkami tik `*_filtered.pose` failai. Vieną failą galima nurodyti su `-i`.
 `--no-recursive` apriboja paiešką vienu katalogu.
@@ -151,10 +162,11 @@ perspektyva peržiūroje gali pakeisti matomą santykį.
 
 - `lt_filtered_animated.blend`: redaguojama scena su animacija.
 - `lt_filtered_animated.fbx`: FBX modelis su iškepta animacija.
-- `lt_filtered_preview.mp4`: modelio animacijos peržiūra, be garso.
-- `lt_filtered_comparison.mp4`: originalas kairėje, modelis dešinėje, be garso.
+- `lt_filtered_preview.mp4`: modelio animacijos peržiūra, be garso (su `--render`).
+- `lt_filtered_comparison.mp4`: originalas kairėje, modelis dešinėje, be garso
+  (su `--render`, jei rastas originalus video).
 
-Palyginimui ieškoma `lt.mp4` (ar kito palaikomo video formato) tame pačiame kataloge.
+Tik su `--render` palyginimui ieškoma `lt.mp4` (ar kito palaikomo video formato) tame pačiame kataloge.
 Palaikoma ir `lt.mp4_filtered.pose` -> `lt.mp4` pora. Originalaus video nesant,
 animacija ir peržiūra sukuriamos, o palyginimas praleidžiamas. Esant keliems
 vienodo pavadinimo originalams su skirtingais plėtiniais, failas pažymimas kaip
@@ -190,9 +202,17 @@ kompiuterį naudokite `--embed-textures` (failai bus didesni).
 animate_poses -i "H:\Science\ViSign\experiments" --overwrite
 ```
 
-Be `--overwrite` praleidžiami tik užbaigti rezultatai su tais pačiais įvesties,
-modelio, tekstūrų ir programos failais bei parinktimis. Pasikeitus jiems arba
-dingus rezultatui, generuojama iš naujo. Nepavykę darbai nepažymimi kaip baigti.
+Be `--overwrite` praleidžiami tik užbaigti etapai su tais pačiais įvesties,
+modelio, tekstūrų ir atitinkamo etapo programos failais bei parinktimis.
+Animacija ir eksporto patikra žymimos `animation_completed.json`, renderinimas –
+`render_completed.json` failu po `.animation/<pozos_vardas>/`.
+Nepavykęs renderinimas išlaiko paruoštą animaciją. Dingus tik peržiūrai,
+pasikeitus originaliam video arba `render_preview.py`, pakartojamas tik renderinimas.
+`--overwrite` atnaujina animaciją ir, jei kartu pateiktas `--render`, jos video.
+Be `--render` senos peržiūros neliečiamos ir gali nebeatitikti naujos animacijos;
+jas atnaujins kitas paleidimas su `--render`.
+Senieji bendri `completed.json` žymekliai nebenaudojami: po šio atnaujinimo
+anksčiau apdorota animacija vieną kartą bus sugeneruota ir patikrinta iš naujo.
 Vieno failo klaida nesustabdo kitų; komanda pabaigoje pateikia suvestinę ir grąžina
 klaidos kodą, jei bent vienas darbas nepavyko. `--dry-run` tik išvardija įvestis.
 

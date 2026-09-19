@@ -5,6 +5,7 @@ from pose_format.estimation.base import add_estimator_arguments, create_estimato
 from typing import List
 from tqdm import tqdm
 from pose_format.bin.estimation_progress import in_worker, parallel_results, send_event, status
+from pose_format.bin.filter_poses import filtered_pose_path, write_filtered_pose
 import os
 from functools import partial
 
@@ -18,9 +19,10 @@ def find_videos_with_missing_pose_files(
     recursive: bool = False,
     keep_video_suffixes: bool = False,
     output_directory: Path = None,
+    filter_output: bool = False,
 ) -> List[Path]:
     """
-    Finds videos with missing .pose files.
+    Finds videos with missing original or requested filtered .pose files.
 
     Parameters
     ----------
@@ -56,7 +58,8 @@ def find_videos_with_missing_pose_files(
 
     for vid_path in video_files:
         corresponding_pose = get_corresponding_pose_path(vid_path, keep_video_suffixes, directory, output_directory)
-        if not corresponding_pose.is_file():
+        if (not corresponding_pose.is_file() or
+                (filter_output and not filtered_pose_path(corresponding_pose).is_file())):
             videos_with_missing_pose_files.append(vid_path)
 
     return videos_with_missing_pose_files
@@ -89,26 +92,36 @@ def get_corresponding_pose_path(video_path: Path, keep_video_suffixes: bool = Fa
 
 def process_video(keep_video_suffixes: bool, pose_format: str, additional_config: dict, vid_path: Path,
                   *, backend='mediapipe-legacy', device='cpu', model=None,
-                  directory=None, output_directory=None, progress=True) -> bool:
+                  directory=None, output_directory=None, progress=True, filter_output=False) -> bool:
     label = str(vid_path.relative_to(directory)) if directory is not None else vid_path.name
-    status(f'Estimating {vid_path} with {backend} on {device}')
 
     def report(completed, total):
         send_event('frame', label, completed, total)
 
     try:
         pose_path = get_corresponding_pose_path(vid_path, keep_video_suffixes, directory, output_directory)
+        pose = None
+        estimated = False
         if pose_path.is_file():
             status(f"Skipping {vid_path}, corresponding .pose file already created.")
         else:
+            status(f'Estimating {vid_path} with {backend} on {device}')
             # pose_video function expects string, and passes it unchanged to cv2.VideoCapture(input_path)
             # if you give cv2.VideoCapture(input_path) a Path it crashes on older versions.
             # https://github.com/opencv/opencv/issues/15731
-            pose_video(str(vid_path.resolve()), str(pose_path.resolve()), pose_format, additional_config, progress=progress,
+            pose = pose_video(str(vid_path.resolve()), str(pose_path.resolve()), pose_format, additional_config, progress=progress,
                        backend=backend, device=device, model=model, verbose=False,
                        progress_callback=report if in_worker() else None,
                        progress_position=1, progress_label=label)
-            return True
+            estimated = True
+        if filter_output:
+            # pose_video has saved the original; reuse its result without reading
+            # the potentially large file again. Refresh stale filtered output if
+            # its original had to be regenerated.
+            count = write_filtered_pose(pose_path, pose, overwrite=estimated)
+            if count is not None:
+                status(f'Filtered {pose_path} -> {filtered_pose_path(pose_path)} ({count} landmarks masked)')
+        return True
             
     except (ValueError, RuntimeError, ImportError, OSError) as e:
         status(f"Error on {vid_path}: {type(e).__name__}: {e}")
@@ -169,26 +182,34 @@ def main():
     parser.add_argument('--output-directory', type=Path,
                         help='Separate output root, preserving input subdirectories (existing outputs are skipped)')
     parser.add_argument('--no-progress', action='store_true', help='Disable video and frame progress bars')
+    parser.add_argument('--filter', dest='filter_output', action='store_true',
+                        help='Also save *_filtered.pose with unreliable leg points (hips preserved); '
+                             'reuse existing originals without estimating again')
     args = parser.parse_args()
     if not args.directory.is_dir():
         parser.error(f'Input directory does not exist: {args.directory}')
     if args.num_workers < 1:
         parser.error('--num-workers must be positive')
     additional_config = parse_additional_config(args.additional_config)
-    try:
-        create_estimator(args.backend, args.device, args.model, additional_config)
-    except (ValueError, OSError) as error:
-        parser.error(str(error))
-
     videos_with_missing_pose_files = find_videos_with_missing_pose_files(
         args.directory,
         video_suffixes=args.video_suffixes,
         recursive=args.recursive,
         keep_video_suffixes=args.keep_video_suffixes,
         output_directory=args.output_directory,
+        filter_output=args.filter_output,
     )
 
-    print(f"Found {len(videos_with_missing_pose_files)} videos missing pose files.")
+    # Filtering existing poses needs neither an estimator nor a model file.
+    if any(not get_corresponding_pose_path(video, args.keep_video_suffixes,
+                                          args.directory, args.output_directory).is_file()
+           for video in videos_with_missing_pose_files):
+        try:
+            create_estimator(args.backend, args.device, args.model, additional_config)
+        except (ValueError, OSError) as error:
+            parser.error(str(error))
+
+    print(f"Found {len(videos_with_missing_pose_files)} videos missing requested pose files.")
 
     pose_files_that_will_be_created = {get_corresponding_pose_path(vid_path, args.keep_video_suffixes) for vid_path in videos_with_missing_pose_files}
 
@@ -211,7 +232,7 @@ def main():
     func = partial(process_video, args.keep_video_suffixes, args.format, additional_config,
                    backend=args.backend, device=args.device, model=args.model,
                    directory=args.directory, output_directory=args.output_directory,
-                   progress=not args.no_progress)
+                   progress=not args.no_progress, filter_output=args.filter_output)
     results = (map(func, videos_with_missing_pose_files)
                if args.num_workers == 1 else
                parallel_results(func, videos_with_missing_pose_files, args.num_workers))

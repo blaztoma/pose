@@ -2,6 +2,7 @@
 
 import argparse
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy.ma as ma
 
@@ -30,6 +31,32 @@ def filter_lower_body(pose: Pose, include_hips: bool = False) -> int:
     return len(indices)
 
 
+def filtered_pose_path(source: Path) -> Path:
+    return source.with_name(f'{source.stem}_filtered.pose')
+
+
+def write_filtered_pose(source: Path, pose: Pose = None, *, include_hips=False, overwrite=False):
+    """Write a filtered copy atomically. An optional in-memory pose is modified.
+
+    The original must already be saved before passing an in-memory pose.
+    Return the number of masked landmarks, or None when the output exists.
+    Face extras and metadata stay next to the original and remain discoverable
+    through the existing _filtered naming convention.
+    """
+    destination = filtered_pose_path(source)
+    if destination.is_file() and not overwrite:
+        return None
+    if pose is None:
+        pose = Pose.read(source.read_bytes())
+    count = filter_lower_body(pose, include_hips)
+    with TemporaryDirectory(prefix='.filter-', dir=source.parent) as temporary:
+        staged = Path(temporary) / destination.name
+        with staged.open('wb') as stream:
+            pose.write(stream)
+        staged.replace(destination)
+    return count
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('-i', required=True, type=Path, help='Input .pose file or directory')
@@ -49,18 +76,15 @@ def main():
     print(f'Found {len(sources)} original pose files.')
     completed = 0
     for source in sources:
-        destination = source.with_name(f'{source.stem}_filtered.pose')
-        if destination.exists():
-            print(f'Skipping existing file: {destination}')
-            continue
-        pose = Pose.read(source.read_bytes())
+        destination = filtered_pose_path(source)
         try:
-            count = filter_lower_body(pose, args.include_hips)
+            count = write_filtered_pose(source, include_hips=args.include_hips)
         except ValueError as error:
             print(f'Skipping {source}: {error}')
             continue
-        with destination.open('wb') as stream:
-            pose.write(stream)
+        if count is None:
+            print(f'Skipping existing file: {destination}')
+            continue
         completed += 1
         print(f'{source} -> {destination} ({count} landmarks masked)')
     print(f'Created {completed} filtered pose files.')

@@ -61,6 +61,23 @@ Išlaikoma pakatalogių struktūra, ankstesnės pozos `videos` kataloge nelieči
 Jei naujame rezultatų kataloge `.pose` jau yra, jis praleidžiamas.
 Pakartotiniam generavimui pasirinkite kitą rezultatų katalogą.
 Be `--output-directory` pozos rašomos greta originalų, kaip ir anksčiau.
+
+Pridėjus `--filter`, kartu išsaugoma ir `*_filtered.pose` kopija: kelių,
+čiurnų, kulnų ir pėdų taškų patikimumas nustatomas į nulį, taškai užmaskuojami.
+Klubai paliekami. Originali poza bei veido `.extras.jsonl` duomenys išsaugomi.
+
+```powershell
+videos_to_poses --directory "H:\Science\ViSign\videos" --recursive `
+  --backend mediapipe-tasks --device cpu --filter
+```
+
+Jei originalus `.pose` jau yra, sukuriamas tik trūkstamas `_filtered.pose`,
+nekartojant video apdorojimo ir neįkeliant aptikimo modelio. Jei abu failai yra,
+įrašas praleidžiamas. Nauja poza filtruojama tiesiai iš atminties po originalo
+išsaugojimo. Veikia ir su `--output-directory`, `--keep-video-suffixes` bei
+keliais procesais. Be `--filter` filtruota kopija nekuriama.
+Atskira `filter_poses` komanda lieka prieinama, taip pat jos `--include-hips` parinktis.
+
 Įvesties kataloge ieškoma visų palaikomų video, įskaitant jame esančias
 vizualizacijų kopijas, todėl dideliam paleidimui naudokite originalių video katalogą.
 
