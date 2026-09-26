@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from progress import report as report_progress
 from face import sample_face
 from mouth_calibration import mesh_mouth_ratio
+from hand_contacts_blender import verify_contacts
 
 
 def main():
@@ -124,6 +125,8 @@ def main():
                        'shape_vertex_deltas': shape_deltas},
               'mouth_geometry': {'samples_checked': len(mouth_samples), 'max_ratio_error': mouth_geometry_error},
               'note': 'Structural check; does not certify gesture accuracy or MetaHuman retargeting.'}
+    if report.get('hand_contacts'):
+        result['hand_contacts'] = verify_contacts(rig, report['hand_contacts'])
     Path(job['validation']).write_text(json.dumps(result, indent=2), encoding='utf-8')
     print('FBX validation passed')
 

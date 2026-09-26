@@ -218,6 +218,101 @@ klaidos kodą, jei bent vienas darbas nepavyko. `--dry-run` tik išvardija įves
 
 ## Ribos
 
+### Piršto ir kitos rankos kontaktas (MĖGTI-D bandymas)
+
+Jei šalia pozos yra `contact_profile.json`, `animate_poses` ir `run_pipeline.py`
+automatiškai pritaiko jame aprašytą kontaktą. Pirmas palaikomas tipas:
+`right_middle_to_left_hand_dorsum` — dešinės rankos vidurinio piršto galiukas
+prie kairės plaštakos / riešo nugarinės pusės. Profilio pavyzdys:
+`library/gestures/MĖGTI-D/default/contact_profile.json`.
+
+Šiame pilote palietimo laikai **pažymėti pagal originalo peržiūrą**, o ne
+automatiškai atpažinti. `strength` aprašo korekcijos įjungimą / išjungimą,
+`clearance_cm` — prisilietimą ir atsitraukimą. Laikai sekundėmis tinka tiek
+25, tiek 30 FPS. Originalaus video vardas ir SHA256 saugo nuo to paties profilio
+atsitiktinio pritaikymo kito žmogaus įrašui. Vienas profilis skirtas vienam
+originaliam video tame kataloge; pakeitus įrašą kontaktus reikia peržiūrėti.
+
+Pagal avataro odos viršūnes nustatomi kontaktų žymekliai. Korekcija pasuka
+vidurinį pirštą ties pagrindu, o dviejų kaulų IK pakoreguoja riešo padėtį,
+išlaikydamas kaulų ilgius, plaštakos orientaciją ir pasyviąją ranką.
+Ji įjungiama ir išjungiama tolygiai. Perkėlus į MetaHuman kontaktas dar kartą
+sprendžiamas pagal konkretaus `MH_Signer` modelio geometriją. Rezultatas
+iškepamas į įprastus animacijos raktus, todėl jį paveldi komponavimas.
+
+`retarget_report.json` saugo profilį, žymeklius ir kiekvieno koreguoto kadro
+paklaidas; `validation.json` patikrina eksportuoto FBX žymeklius.
+Unreal importo ataskaitos `checks.hand_contacts` papildomai patikrina iškeptą
+animaciją. Žymekliams naudojami visi pasirinktą odos viršūnę veikiantys kaulai
+ir jų svoriai, įskaitant riešo korekcinius kaulus. Tai nėra pilna odos
+kolizijų sistema: vaizdinė peržiūra išlieka būtina. Šis režimas nepatvirtina
+gesto lingvistinio tikslumo ir neatkuria visų trūkstamų pirštų detalių.
+
+Pakeitus profilį įprastas paleidimas atnaujina animaciją ir priklausomus
+rezultatus. `--new-only` čia netinka, nes jis sąmoningai pasitiki jau užbaigtais
+įrašais. Įrašai be profilio kontaktų korekcijos nenaudoja.
+
+**Profilio 2 versija** palietimus saugo atskiruose `contact_intervals_seconds`
+intervaluose. Tarp jų `release_trajectories[].up_hand_lengths` aprašo pakilimo
+laiko kreivę: aukštis pateikiamas avataro pasyvios plaštakos riešo–vidurinio
+piršto pagrindo ilgio dalimis. Pakilimas vyksta vertikaliai aukštyn; kontaktų
+intervalais galiukas grąžinamas į plaštakos paviršių. Bendras `strength` valdo
+korekcijos įėjimą / išėjimą, o ne nuolatinį piršto prispaudimą. `clearance_cm`
+lieka priartėjimo ir galutinio atsitraukimo kreive už pažymėtos sekos ribų.
+
+MĖGTI-D pirmas palietimas: 0,92–0,98 s; pakilimas: 0,98–1,12 s;
+antras palietimas: 1,12–1,36 s. Pakilimo pikas 1,04 s siekia 0,35 plaštakos
+ilgio. Tai vaizdiškai parinktas pirmo bandymo aukštis, ne išmatuotas 3D atstumas.
+Piką ir visą kreivę galima keisti profilyje. Kiti pirštai, pasyvi ranka ir
+judesiai už korekcijos intervalo išlaikomi. 1 versijos profiliai tebepalaikomi.
+
+`taps` patikra Blender, pakartotinai įkeltame FBX ir Unreal tikrina atskirus
+palietimus bei tikrą žymeklio pakilimą tarp jų. Susiliejus palietimams arba
+pranykus pakilimui apdorojimas laikomas nepavykusiu.
+
+### Pirštų formos perkėlimas plaštakos atžvilgiu
+
+Šalia konkretaus `*_filtered.pose` galima padėti `handshape_profile.json`.
+`animate_poses` ir `run_pipeline.py` jį automatiškai įtraukia į animavimo
+užduotį. Pavyzdys: `library/gestures/AŠ/default/handshape_profile.json`.
+Įrašai be šio failo animuojami kaip anksčiau.
+
+Profilis saugo penkių pirštų trijų segmentų vienetines kryptis vietinėje
+plaštakos sistemoje: X eina nuo riešo link vidurinio piršto pagrindo, Y —
+link smiliaus pagrindo, Z — jų vektorinė sandauga. Donoro padėtis, mastelis
+ir pasukimas pašalinami. Avataro plaštakos pasukimas ir kaulų ilgiai išlieka
+savi; keičiami tik nurodytos rankos 15 pirštų kaulų pasukimai. Perkeliama
+forma, o ne donoro rankos trajektorija. Kairės ir dešinės rankų veidrodinis
+perkėlimas šiuo metu nenumatytas — rinktis tą pačią pusę.
+
+`strength` yra sekundžių ir stiprumo (0–1) poros. Už intervalo korekcijos
+nėra, o įėjimas ir išėjimas glotninami. Pilno stiprumo metu laikoma viena
+donoro forma; tai tinka pasirinktam statinės formos intervalui, tačiau
+netinka visam gestui, kuriame pati pirštų forma keičiasi. Po šio žingsnio,
+jeigu yra kontaktų profilis, kontaktų korekcija turi pirmenybę.
+
+`handshape_profile.extract_template` sudaro formą iš peržiūrėtų, aptiktų
+donoro kadrų paruoštame NPZ. AŠ bandymo parengimas aprašytas
+`experiments/as-handshape/prepare_experiment.py`: naudojama sakinio video
+1,16–1,32 s atkarpa, o AŠ koreguojamas 0,28–1,72 s intervale.
+`provenance` registruoja donorą, kadrus ir matavimų sklaidą.
+
+Originalūs `.pose` ir pasitikėjimo įverčiai nekeičiami. Profilis susietas su
+konkrečiais video ir pozos SHA256; pakeitus šiuos šaltinius būtina peržiūrėti
+profilį. Profilio pakeitimai keičia animacijos kontrolinį atspaudą, todėl
+įprastas paleidimas pergeneruoja priklausomus rezultatus (`--new-only`
+šioms korekcijoms netinka). Profilio kopija saugoma animacijos užduotyje ir
+`retarget_report.json`, taigi patenka ir į bibliotekos `animation_data`.
+
+Animavimo patikra visuose kadruose tikrina, kad nepakeisti kitų kaulų
+vietiniai pasukimai bei pirštai už intervalo, ir kad pilnu stiprumu pirštų
+segmentai atitinka užduotas kryptis. Papildomai tikrinamas FBX importas.
+Tai rekonstruota forma iš vienos kameros, ne naujai išmatuoti paslėpti
+pirštai. Ji netaiso klaidingos pačios plaštakos orientacijos ar kontakto
+su kūnu, todėl būtina vaizdinė peržiūra.
+
+### Bendros rekonstrukcijos ribos
+
 Animuojami žastai, dilbiai, plaštakos, pirštai, galva ir du viršutiniai stuburo
 kaulai (39 kaulai iš viso). Galvos pasukimas, linktelėjimas ir šoninis palenkimas
 gaunami iš standaus viršutinės veido dalies taškų sutapdinimo; lūpų ir žandikaulio

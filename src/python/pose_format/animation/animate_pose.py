@@ -18,6 +18,8 @@ from motion import head_motion, torso_motion, smooth_valid, mp_to_rig
 from progress import report
 from arm_ik import calibrate_arms, solve_two_bone
 from face import animate_face
+from hand_contacts_blender import bake_contacts
+from handshape_blender import bake_handshape
 
 IDENTITY = Quaternion()
 
@@ -289,6 +291,20 @@ def main():
 
         report('Animating', frame + 1, frames)
 
+    if job.get('handshape_profile'):
+        report('Transferring handshape', 0, 1, 'step')
+        stats['handshape'] = bake_handshape(rig, job['handshape_profile'], float(data['fps']), frames)
+        report('Transferring handshape', 1, 1, 'step')
+    if job.get('hand_contacts'):
+        report('Fitting hand contacts', 0, 1, 'step')
+        stats['hand_contacts'] = bake_contacts(rig, meshes, job['hand_contacts'], float(data['fps']), frames)
+        # Contact correction deliberately refines the inferred right wrist targets.
+        for sample in stats['hand_contacts']['samples']:
+            frame = sample['frame'] - 1
+            scene.frame_set(frame+1)
+            bpy.context.view_layer.update()
+            ik_world[frame, 1] = rig.matrix_world @ rig.pose.bones['Bip01 R Hand'].matrix.translation
+        report('Fitting hand contacts', 1, 1, 'step')
     stats['face'] = animate_face(meshes, data, report, job.get('mouth_calibration', 'auto'))
     stats['face']['input'] = job.get('face_input', {})
     rig.animation_data.action.name = job['name'] + '_upper_body_from_pose'

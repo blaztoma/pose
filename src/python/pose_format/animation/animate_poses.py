@@ -13,6 +13,8 @@ from tqdm import tqdm
 from .prepare_pose import prepare_pose
 from .face import find_extras
 from .progress import parse as parse_progress
+from .hand_contacts import load_profile
+from .handshape_profile import load_profile as load_handshape
 
 SCRIPTS = Path(__file__).resolve().parent
 VIDEO_SUFFIXES = {'.mp4', '.mov', '.avi', '.mkv', '.flv', '.wmv', '.webm'}
@@ -77,12 +79,19 @@ def find_executable(name, explicit=None):
 def make_job(source, model, embed_textures=False):
     work = source.parent / '.animation' / source.stem
     prefix = source.parent / source.stem
-    return {'name': source.stem, 'source': str(source), 'model': str(model),
+    job = {'name': source.stem, 'source': str(source), 'model': str(model),
             'data': str(work / 'pose_data.npz'), 'report': str(work / 'retarget_report.json'),
             'validation': str(work / 'validation.json'),
             'blend': str(prefix) + '_animated.blend', 'fbx': str(prefix) + '_animated.fbx',
             'preview': str(prefix) + '_preview.mp4', 'comparison': str(prefix) + '_comparison.mp4',
             'embed_textures': embed_textures}
+    contact = load_profile(source)
+    if contact is not None:
+        job['hand_contacts'] = contact
+    handshape = load_handshape(source)
+    if handshape is not None:
+        job['handshape_profile'] = handshape
+    return job
 
 
 def fingerprint(job, video=None, stage='animation'):
